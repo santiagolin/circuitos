@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Circuitos</title>
+    <style>
+        #canvas {
+            border: 2px solid #333;
+            cursor: crosshair;
+            background: #f0f0f0;
+        }
+        .controls {
+            margin: 10px 0;
+            padding: 10px;
+            background: #eee;
+            border-radius: 5px;
+        }
+        button {
+            margin: 0 5px;
+            padding: 8px 15px;
+            cursor: pointer;
+        }
+        .selected {
+            background: #4CAF50;
+            color: white;
+        }
+        .switch-controls {
+            margin-top: 10px;
+        }
+        #downloadBtn {
+            background: #2196F3;
+            color: white;
+            border: none;
+            border-radius: 4px;
+        }
+        #downloadBtn:hover {
+            background: #1976D2;
+        }
+    </style>
+</head>
+<body>
+    <div class="controls">
+        <button id="lineBtn" class="selected">Línea</button>
+        <button id="switchBtn">Llave</button>
+        <button id="undoBtn">Deshacer</button>
+        <button id="redoBtn">Rehacer</button>
+        <button id="clearBtn">Limpiar Todo</button>
+        <button id="downloadBtn">Descargar</button>
+        <div class="switch-controls">
+            <label>
+                <input type="checkbox" id="switchStateCheck"> Llave Abierta
+            </label>
+        </div>
+    </div>
+    <canvas id="canvas" width="800" height="600"></canvas>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const lineBtn = document.getElementById('lineBtn');
+        const switchBtn = document.getElementById('switchBtn');
+        const undoBtn = document.getElementById('undoBtn');
+        const redoBtn = document.getElementById('redoBtn');
+        const clearBtn = document.getElementById('clearBtn');
+        const downloadBtn = document.getElementById('downloadBtn');
+        const switchStateCheck = document.getElementById('switchStateCheck');
+
+        let isDrawing = false;
+        let startX = 0;
+        let startY = 0;
+        let currentTool = 'line';
+        let drawnElements = [];
+        let undoStack = [];
+        let redoStack = [];
+        const snapDistance = 10;
+        const labelPadding = 20;
+
+        function getNextAvailableLabel() {
+            const usedLabels = drawnElements
+                .filter(element => element.type === 'switch')
+                .map(element => element.label);
+            
+            for (let i = 0; i < 26; i++) {
+                const label = String.fromCharCode(97 + i); // 97 es 'a' en ASCII
+                if (!usedLabels.includes(label)) {
+                    return label;
+                }
+            }
+            
+            let prefix = 'a';
+            let suffix = 'a';
+            while (true) {
+                const label = prefix + suffix;
+                if (!usedLabels.includes(label)) {
+                    return label;
+                }
+                if (suffix === 'z') {
+                    prefix = String.fromCharCode(prefix.charCodeAt(0) + 1);
+                    suffix = 'a';
+                } else {
+                    suffix = String.fromCharCode(suffix.charCodeAt(0) + 1);
+                }
+            }
+        }
+
+        ctx.strokeStyle = '#000';
+        ctx.lineWidth = 2;
+
+        downloadBtn.addEventListener('click', () => {
+            const tempCanvas = document.createElement('canvas');
+            tempCanvas.width = canvas.width;
+            tempCanvas.height = canvas.height;
+            const tempCtx = tempCanvas.getContext('2d');
+
+            tempCtx.fillStyle = 'white';
+            tempCtx.fillRect(0, 0, tempCanvas.width, tempCanvas.height);
+            tempCtx.drawImage(canvas, 0, 0);
+
+            const link = document.createElement('a');
+            link.download = 'circuit.png';
+            link.href = tempCanvas.toDataURL('image/png');
+            link.click();
+        });
+
+        function findClosestPoint(x, y) {
+            let closest = null;
+            let minDistance = snapDistance;
+
+            drawnElements.forEach(element => {
+                const d1 = Math.hypot(x - element.x1, y - element.y1);
+                if (d1 < minDistance) {
+                    minDistance = d1;
+                    closest = { x: element.x1, y: element.y1 };
+                }
+
+                const d2 = Math.hypot(x - element.x2, y - element.y2);
+                if (d2 < minDistance) {
+                    minDistance = d2;
+                    closest = { x: element.x2, y: element.y2 };
+                }
+            });
+
+            return closest;
+        }
+
+        function snapToGrid(startX, startY, endX, endY) {
+            const dx = endX - startX;
+            const dy = endY - startY;
+            
+            if (Math.abs(dx) > Math.abs(dy)) {
+                return {
+                    x: endX,
+                    y: startY
+                };
+            } 
+            else {
+                return {
+                    x: startX,
+                    y: endY
+                };
+            }
+        }
+
+        function redrawAll() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            drawnElements.forEach(element => {
+                if (element.type === 'line') {
+                    drawLine(element.x1, element.y1, element.x2, element.y2, false);
+                } else {
+                    drawSwitch(element.x1, element.y1, element.x2, element.y2, false, element.isOpen, element.label);
+                }
+            });
+        }
+
+        lineBtn.addEventListener('click', () => {
+            currentTool = 'line';
+            lineBtn.classList.add('selected');
+            switchBtn.classList.remove('selected');
+        });
+
+        switchBtn.addEventListener('click', () => {
+            currentTool = 'switch';
+            switchBtn.classList.add('selected');
+            lineBtn.classList.remove('selected');
+        });
+
+        undoBtn.addEventListener('click', () => {
+            if (drawnElements.length > 0) {
+                redoStack.push(drawnElements.pop());
+                redrawAll();
+            }
+        });
+
+        redoBtn.addEventListener('click', () => {
+            if (redoStack.length > 0) {
+                drawnElements.push(redoStack.pop());
+                redrawAll();
+            }
+        });
+
+        clearBtn.addEventListener('click', () => {
+            drawnElements = [];
+            undoStack = [];
+            redoStack = [];
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+        });
+
+        document.addEventListener('keydown', (e) => {
+            if (e.ctrlKey && e.key === 'z') {
+                undoBtn.click();
+            } else if (e.ctrlKey && e.shiftKey && e.key === 'z') {
+                redoBtn.click();
+            }
+        });
+
+        function drawLine(x1, y1, x2, y2, isPreview = false) {
+            ctx.save();
+            if (isPreview) {
+                ctx.strokeStyle = '#999';
+                ctx.setLineDash([5, 5]);
+            } else {
+                ctx.strokeStyle = '#000';
+                ctx.setLineDash([]);
+            }
+            ctx.beginPath();
+            ctx.moveTo(x1, y1);
+            ctx.lineTo(x2, y2);
+            ctx.stroke();
+            ctx.restore();
+        }
+
+        function drawSwitch(x1, y1, x2, y2, isPreview = false, isOpen = false, label = '') {
+            ctx.save();
+            if (isPreview) {
+                ctx.strokeStyle = '#999';
+                ctx.setLineDash([5, 5]);
+            } else {
+                ctx.strokeStyle = '#000';
+                ctx.setLineDash([]);
+            }
+            
+            ctx.beginPath();
+            ctx.arc(x1, y1, 3, 0, Math.PI * 2);
+            ctx.fill();
+
+            ctx.beginPath();
+            ctx.arc(x2, y2, 3, 0, Math.PI * 2);
+            ctx.fill();
+
+            if (isOpen) {
+                let dx = x2 - x1;
+                let dy = y2 - y1;
+                const length = Math.sqrt(dx * dx + dy * dy);
+                
+                dx = dx / length;
+                dy = dy / length;
+                
+                const elevationAmount = length * 0.7;
+                const perpX = dy + dx;
+                const perpY = -dx + dy;
+                
+                const perpLength = Math.sqrt(perpX * perpX + perpY * perpY);
+                const normalizedPerpX = perpX / perpLength;
+                const normalizedPerpY = perpY / perpLength;
+                
+                const midX = (x1 + x2) / 2 + normalizedPerpX * elevationAmount;
+                const midY = (y1 + y2) / 2 + normalizedPerpY * elevationAmount;
+                
+                ctx.beginPath();
+                ctx.moveTo(x1, y1);
+                ctx.lineTo(midX, midY);
+                ctx.stroke();
+            } else {
+                ctx.beginPath();
+                ctx.moveTo(x1, y1);
+                ctx.lineTo(x2, y2);
+                ctx.stroke();
+            }
+
+            let labelX = (x1 + x2) / 2;
+            let labelY = Math.max(y1, y2) + labelPadding;
+
+            ctx.font = '25px Arial';
+            ctx.fillStyle = '#000';
+            ctx.fillText(label, labelX - 5, labelY);
+            
+            ctx.restore();
+        }
+
+        canvas.addEventListener('mousedown', (e) => {
+            isDrawing = true;
+            const rect = canvas.getBoundingClientRect();
+            let mouseX = e.clientX - rect.left;
+            let mouseY = e.clientY - rect.top;
+
+            const closestPoint = findClosestPoint(mouseX, mouseY);
+            if (closestPoint) {
+                startX = closestPoint.x;
+                startY = closestPoint.y;
+            } else {
+                startX = mouseX;
+                startY = mouseY;
+            }
+        });
+
+        canvas.addEventListener('mousemove', (e) => {
+            if (!isDrawing) return;
+            
+            const rect = canvas.getBoundingClientRect();
+            let currentX = e.clientX - rect.left;
+            let currentY = e.clientY - rect.top;
+
+            const closestPoint = findClosestPoint(currentX, currentY);
+            if (closestPoint) {
+                currentX = closestPoint.x;
+                currentY = closestPoint.y;
+            }
+
+            const snapped = snapToGrid(startX, startY, currentX, currentY);
+            currentX = snapped.x;
+            currentY = snapped.y;
+
+            redrawAll();
+            
+            if (currentTool === 'line') {
+                drawLine(startX, startY, currentX, currentY, true);
+            } else {
+                const nextLabel = getNextAvailableLabel();
+                drawSwitch(startX, startY, currentX, currentY, true, switchStateCheck.checked, nextLabel);
+            }
+        });
+
+        canvas.addEventListener('mouseup', (e) => {
+            if (!isDrawing) return;
+            
+            const rect = canvas.getBoundingClientRect();
+            let endX = e.clientX - rect.left;
+            let endY = e.clientY - rect.top;
+
+            const closestPoint = findClosestPoint(endX, endY);
+            if (closestPoint) {
+                endX = closestPoint.x;
+                endY = closestPoint.y;
+            }
+
+            const snapped = snapToGrid(startX, startY, endX, endY);
+            endX = snapped.x;
+            endY = snapped.y;
+
+            const newElement = {
+                type: currentTool,
+                x1: startX,
+                y1: startY,
+                x2: endX,
+                y2: endY,
+                isOpen: currentTool === 'switch' ? switchStateCheck.checked : false,
+                label: currentTool === 'switch' ? getNextAvailableLabel() : ''
+            };
+
+            drawnElements.push(newElement);
+            undoStack.push(newElement);
+            redoStack = [];
+
+            redrawAll();
+            isDrawing = false;
+        });
+    </script>
+</body>
+</html>
